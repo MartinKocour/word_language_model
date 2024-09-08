@@ -1,0 +1,2 @@
+torch
+fast-transformers  # pip install --user pytorch-fast-transformers
