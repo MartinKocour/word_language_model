@@ -33,12 +33,16 @@ The `main.py` script accepts the following arguments:
 optional arguments:
   -h, --help            show this help message and exit
   --data DATA           location of the data corpus
-  --model MODEL         type of network (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)
+  --model MODEL         type of network (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer, CustomTransformer)
+  --attention-type      type of attention mechanism used in CustomTransformer (e.g. 'full', 'additive', 'linear', etc.)
   --emsize EMSIZE       size of word embeddings
   --nhid NHID           number of hidden units per layer
   --nlayers NLAYERS     number of layers
   --lr LR               initial learning rate
   --clip CLIP           gradient clipping
+  --optim               name of the optimizer(e.g. 'adam' or 'adamw')
+  --wd                  weight decay (used in AdamW)
+  --gamma               multiplicative factor of lr decay
   --epochs EPOCHS       upper epoch limit
   --batch_size N        batch size
   --bptt BPTT           sequence length
