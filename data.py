@@ -18,7 +18,7 @@ class Dictionary(object):
 
 
 class Corpus(object):
-    def __init__(self, path, clean=True):
+    def __init__(self, path, clean=False):
         self.clean = clean
         self.dictionary = Dictionary()
         self.train = self.tokenize(os.path.join(path, 'train.txt'))

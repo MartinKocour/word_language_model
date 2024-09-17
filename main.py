@@ -15,6 +15,8 @@ import metrics
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM/GRU/Transformer Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
+parser.add_argument('--data-clean', action='store_true',
+                    help='Apply data cleaning strategies')
 parser.add_argument('--model', type=str, default='LSTM',
                     help='type of network (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
 parser.add_argument('--emsize', type=int, default=256,
@@ -48,7 +50,7 @@ parser.add_argument('--seed', type=int, default=1111,
 parser.add_argument('--cuda', action='store_true', default=False,
                     help='use CUDA')
 parser.add_argument('--mps', action='store_true', default=False,
-                        help='enables macOS GPU training')
+                    help='enables macOS GPU training')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
 parser.add_argument('--save', type=str, default='model.pt',
@@ -84,7 +86,7 @@ else:
 ###############################################################################
 # Load data
 ###############################################################################
-corpus = data.Corpus(args.data)
+corpus = data.Corpus(args.data, clean=args.data_clean)
 
 
 # Starting from sequential data, batchify arranges the dataset into columns.
