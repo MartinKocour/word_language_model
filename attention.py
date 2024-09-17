@@ -38,8 +38,8 @@ class AdditiveAttention(nn.Module):
         _, S, _, D = values.shape
 
         # Compute energy
-        E = self.forward_score(queries, keys)  # [N, L, S, H]
-        E = E.permute(0, 3, 1, 2)
+        E = self.forward_score(queries, keys)  # [B, L, S, H]
+        E = E.permute(0, 3, 1, 2)  # [B, H, L, S]
 
         # Apply mask
         if not attn_mask.all_ones:
@@ -48,8 +48,8 @@ class AdditiveAttention(nn.Module):
             E = E + key_lengths.additive_matrix[:, None, None]
 
         # Compute attention
-        A = self.dropout(torch.softmax(E, dim=-1))  # [N, H,  L, S]
-        V = torch.einsum("nhls,nshd->nlhd", A, values)
+        A = self.dropout(torch.softmax(E, dim=-1))  # [B, H,  L, S]
+        V = torch.einsum("bhls,bshd->blhd", A, values)  # [B, L, H, D]
 
         # Let the world know of the attention matrix
         self.event_dispatcher.dispatch(AttentionEvent(self, A))

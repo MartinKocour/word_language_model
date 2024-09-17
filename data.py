@@ -18,7 +18,8 @@ class Dictionary(object):
 
 
 class Corpus(object):
-    def __init__(self, path):
+    def __init__(self, path, clean=True):
+        self.clean = clean
         self.dictionary = Dictionary()
         self.train = self.tokenize(os.path.join(path, 'train.txt'))
         self.valid = self.tokenize(os.path.join(path, 'valid.txt'))
@@ -38,7 +39,9 @@ class Corpus(object):
         with open(path, 'r', encoding="utf8") as f:
             idss = []
             for line in f:
-                words = line.split() + ['<eos>']
+                if not self.isvalid(line):
+                    continue
+                words = line.strip().split() + ['<eos>']
                 ids = []
                 for word in words:
                     ids.append(self.dictionary.word2idx[word])
@@ -46,3 +49,14 @@ class Corpus(object):
             ids = torch.cat(idss)
 
         return ids
+
+    def isvalid(self, line):
+        if not self.clean:
+            return True
+        elif line is None:
+            return False
+        elif len(line.strip()) == 0:
+            return False
+        elif line.strip().startswith("=") and line.strip().endswith("="):
+            return False
+        return True
