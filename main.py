@@ -11,8 +11,14 @@ import data
 import model
 import metrics
 
+from datetime import datetime
+from fast_transformers.attention_registry import AttentionRegistry
+
+now = datetime.now()
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM/GRU/Transformer Language Model')
+parser.add_argument('--exp_name', type=str, default=now.strftime("%d-%m-%yT%H-%M-%S"),
+                    help="Name of the experiment")
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
 parser.add_argument('--data-clean', action='store_true',
@@ -53,7 +59,7 @@ parser.add_argument('--mps', action='store_true', default=False,
                     help='enables macOS GPU training')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
-parser.add_argument('--save', type=str, default='model.pt',
+parser.add_argument('--save', type=str, default=None,
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
@@ -62,7 +68,7 @@ parser.add_argument('--nhead', type=int, default=2,
 parser.add_argument('--dry-run', action='store_true',
                     help='verify the code and the model')
 parser.add_argument('--attention-type', default="full",
-                    choices=["full", "linear", "additive", "multiplicative"],
+                    choices=AttentionRegistry.keys,
                     help='Typ of attention mechanism, ("full" is equivalent to scaled dot product attention)')
 args = parser.parse_args()
 
@@ -109,7 +115,6 @@ def batchify(data, bsz):
     data = data.view(bsz, -1).t().contiguous()
     return data.to(device)
 
-
 eval_batch_size = 10
 train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
@@ -140,7 +145,7 @@ else:
 lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, patience=4, factor=args.gamma, min_lr=1e-5)
 print(model)
 print(criterion)
-print(f"{round(sum([p.numel() for p in model.parameters()])/1000000)}M")
+print(f"{round(sum([p.numel() for p in model.parameters()])/1000000, 3)}M")
 
 ###############################################################################
 # Training code
@@ -254,7 +259,12 @@ def export_onnx(path, batch_size, seq_len):
 best_val_loss = None
 
 # Log metrics to tensorboard
-metric_writer = metrics.LMMetricWritter(model)
+metric_writer = metrics.LMMetricWritter(model, args.exp_name)
+
+if args.save is None:
+    if not os.path.isdir("models"):
+        os.mkdir("models")
+    args.save = os.path.join("models", f"{args.exp_name}_model.pt")
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:

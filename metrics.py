@@ -2,6 +2,7 @@
 #
 # Author: Martin Kocour (BUT)
 
+import os
 import torch
 import math
 
@@ -19,8 +20,9 @@ def get_grads(params):
 
 
 class GeneralMetricWritter(object):
-    def __init__(self, model):
-        self._writter = SummaryWriter()
+    def __init__(self, model, exp_name=None):
+        log_dir = None if exp_name is None else os.path.join("runs", exp_name)
+        self._writter = SummaryWriter(log_dir=log_dir)
         self._model = model
         self._step = 0
 
@@ -43,8 +45,9 @@ class GeneralMetricWritter(object):
             self._writter.flush()
         return step
 
-    def log_hparams(self, *args, **kwargs):
-        self._writter.add_hparams(*args, **kwargs)
+    def log_hparams(self, hparam_dict, metric_dict, **kwargs):
+        metric_dict["hparam/nparams"] = sum([p.numel() for p in self._model.parameters()])
+        self._writter.add_hparams(hparam_dict, metric_dict, **kwargs)
 
     def close(self):
         self._writter.close()
