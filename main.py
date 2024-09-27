@@ -145,7 +145,11 @@ else:
 lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, patience=4, factor=args.gamma, min_lr=1e-5)
 print(model)
 print(criterion)
+print("Model Size:\t", end='')
 print(f"{round(sum([p.numel() for p in model.parameters()])/1000000, 3)}M")
+print("Attention size:\t", end='')
+print(f"{round(sum([p.numel() for k,p in model.named_parameters() if 'inner_attention' in k])/1000000, 3)}M")
+print([k for k,_ in model.named_parameters() if 'layers.0.attention.inner_attention' in k])
 
 ###############################################################################
 # Training code

@@ -97,11 +97,11 @@ class SummaryMixing(nn.Module):
 
         self.query_dimensions = query_dimensions
         if activation == "tanh":
-            self.activation = nn.Tanh()
+            self.activation = nn.Tanh
         elif activation == "relu":
-            self.activation = nn.ReLU()
+            self.activation = nn.ReLU
         elif activation == "gelu":
-            self.activation = nn.GELU()
+            self.activation = nn.GELU
         else:
             raise ValueError("Unknown activation type")
 
@@ -109,11 +109,17 @@ class SummaryMixing(nn.Module):
         self.dropout = nn.Dropout(attention_dropout)
 
         if self.mode == "SummaryMixing" or self.mode == "SummaryMixing-expdecay":
-            self.summary_local_merging = ParallelLinear(
-                query_dimensions*n_heads,
+            self.local_proj = ParallelLinear(
+                n_neurons=query_dimensions*n_heads,
                 input_shape=[None, None, n_heads, query_dimensions],
                 n_split=n_heads,
-                combine_out_dims=False
+                combine_out_dims=True
+            )
+            self.summary_local_merging = VanillaNN(
+                input_shape=[None, None, n_heads, 2*query_dimensions],
+                dnn_blocks=1,
+                dnn_neurons=[query_dimensions*n_heads],
+                activation=self.activation
             )
 
         if self.mode == "SummaryMixing-fast":
@@ -132,6 +138,13 @@ class SummaryMixing(nn.Module):
             #     dnn_neurons=[query_dimensions],
             #     activation=activation,
             # )
+        else:
+            self.summary_proj = ParallelLinear(
+                n_neurons=query_dimensions*n_heads,
+                input_shape=[None, None, n_heads, query_dimensions],
+                n_split=n_heads,
+                combine_out_dims=True
+            )
 
         if self.mode == "SummaryMixing-expdecay":
             self.decay_constant = nn.Parameter(
@@ -178,40 +191,37 @@ class SummaryMixing(nn.Module):
         _, N, _, D = values.shape
 
         # f() (Eq. 1b)
-        local_summary = keys
+        local_summary = self.local_proj(keys)
         if not k_lengths.all_ones:
-            local_summary = local_summary * k_lengths.float_matrix[:, :, None, None]
+            local_summary = local_summary * k_lengths.float_matrix[:, :, None]
 
         # s() (Eq. 2 and 1c)
-        time_summary = queries
+        time_summary = self.summary_proj(queries)
         if not q_lengths:
-            time_summary = time_summary * q_lengths.float_matrix[:, :, None, None]
+            time_summary = time_summary * q_lengths.float_matrix[:, :, None]
 
         sum_mask = sum_mask.float_matrix if sum_mask is not None else None
         if self.mode == "SummaryMixing-expdecay":
             sum_mask = self._laplace_weights(T, self.decay_constant, sum_mask, keys.device)
 
         if sum_mask is None:
-
             # We normalise by real length by counting masking
-            time_summary = torch.sum(time_summary, dim=1) / q_lengths.lengths[:, None, None]
+            time_summary = torch.sum(time_summary, dim=1) / q_lengths.lengths[:, None]
             time_summary = time_summary.unsqueeze(1).repeat(1, T, 1, 1)
-
         else:
-
             # We must do a masked sum. The mask is [Time, Time] and the features are [B,T,F]
             # We therefore can do a matmul between [B,F,T] and [Time,Time].T to obtain [B,F,T] that we can re-transpose.
             # We need to be careful when dividing as padding is not included in sum_mask. We need to build the intersection
             # of both mask to know the actual real number of elements excluding padding.
 
             # full_mask_with_pad = torch.matmul(sum_mask, src_padding_mask)
-            time_summary = torch.einsum("st,bthf->bshf", sum_mask, time_summary) / torch.sum(
+            time_summary = torch.matmul(sum_mask, time_summary) / torch.sum(
                 sum_mask, dim=1
-            )[:, None, None]
+            ).unsqueeze(-1)
 
         return self.summary_local_merging(
             self.dropout(torch.cat([local_summary, time_summary], dim=-1))
-        )
+        ).contiguous()
 
     def _forward_mixing_fast(self, x, sum_mask, src_padding_mask):
         """Perform full SummaryMixing.
@@ -429,6 +439,9 @@ class ParallelLinear(torch.nn.Module):
 
         self._reset_parameters()
 
+    def extra_repr(self):
+        return f"n_split={self.n_split}, in_features={self.split_inp_dim}, out_features={self.split_out_dim}, bias=True, combine_dims={self.combine_out_dims}"
+
     def _reset_parameters(self):
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
         # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
@@ -456,3 +469,80 @@ class ParallelLinear(torch.nn.Module):
 
         return x
 
+
+class VanillaNN(nn.Sequential):
+    """A simple vanilla Deep Neural Network.
+
+    Arguments
+    ---------
+    input_shape : tuple
+        Expected shape of the input tensors.
+    activation : torch class
+        A class used for constructing the activation layers.
+    dnn_blocks : int
+        The number of linear neural blocks to include.
+    dnn_neurons : int or list[int]
+        The number of neurons in the different linear layers.
+        If a list is given, the length must correspond to the
+        number of layers. If a int is given, all layers will
+        have the same size.
+    n_split: int
+        The number of split to create n_split linear transformations.
+        In practice the input and the output are split n_split times.
+        Hence we create n_split parallel linear op that will operate on
+        each split dimension. E.g. if x = [B,T,F] and n_split = 4
+        then x = [B,T,4,F/4] and W = [4,F/4,out_dim/4]. This will happen
+        in each layer of the VanillaNN.
+
+    Example
+    -------
+    >>> inputs = torch.rand([10, 120, 60])
+    >>> model = VanillaNN(input_shape=inputs.shape)
+    >>> outputs = model(inputs)
+    >>> outputs.shape
+    torch.Size([10, 120, 512])
+    """
+
+    def __init__(
+        self,
+        input_shape,
+        activation=torch.nn.LeakyReLU,
+        dnn_blocks=2,
+        dnn_neurons=512,
+        n_split=1,
+    ):
+        super().__init__()
+
+        if isinstance(dnn_neurons, list):
+            if len(dnn_neurons) != dnn_blocks:
+                msg = "The length of the dnn_neurons list must match dnn_blocks..."
+                raise ValueError(msg)
+
+        for block_index in range(dnn_blocks):
+            if isinstance(dnn_neurons, list):
+                current_nb_neurons = dnn_neurons[block_index]
+            else:
+                current_nb_neurons = dnn_neurons
+
+            if n_split > 1:
+                # ParrallelLinear does a costly reshape operation, hence we minimise this
+                # cost by only doing this reshape for the last layer of the MLP.
+                if block_index < (dnn_blocks - 1):
+                    combine_out_dims = False
+                else:
+                    combine_out_dims = True
+                self.append(
+                    ParallelLinear(
+                        n_neurons=current_nb_neurons,
+                        input_shape=input_shape,
+                        n_split=n_split,
+                        bias=True,
+                        combine_out_dims=combine_out_dims,
+                    )
+                )
+            else:
+                input_size = input_shape[-1] * input_shape[-2] if len(input_shape) > 3 else input_shape[-1]
+                self.append(
+                    nn.Linear(input_size, current_nb_neurons, bias=True)
+                )
+            self.append(activation())
