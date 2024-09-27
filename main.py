@@ -10,6 +10,7 @@ import torch.onnx
 import data
 import model
 import metrics
+import random
 
 from datetime import datetime
 from fast_transformers.attention_registry import AttentionRegistry
@@ -23,6 +24,8 @@ parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
 parser.add_argument('--data-clean', action='store_true',
                     help='Apply data cleaning strategies')
+parser.add_argument('--shuffle', action='store_true', default=False,
+                    help='shuffle data')
 parser.add_argument('--model', type=str, default='LSTM',
                     help='type of network (RNN_TANH, RNN_RELU, LSTM, GRU, Transformer)')
 parser.add_argument('--emsize', type=int, default=256,
@@ -74,6 +77,7 @@ args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
+random.seed(args.seed)
 if torch.cuda.is_available():
     if not args.cuda:
         print("WARNING: You have a CUDA device, so you should probably run with --cuda.")
@@ -210,7 +214,12 @@ def train():
     ntokens = len(corpus.dictionary)
     if args.model not in ['Transformer', 'CustomTransformer']:
         hidden = model.init_hidden(args.batch_size)
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, args.bptt)):
+    if args.shuffle:
+        idxs = list(range(0, train_data.size(0) - args.bptt - 1))
+        random.shuffle(idxs)
+    else:
+        idxs = list(range(0, train_data.size(0), args.bptt))
+    for batch, i in enumerate(idxs):
         data, targets = get_batch(train_data, i)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
@@ -243,7 +252,7 @@ def train():
             elapsed = time.time() - start_time
             print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | grad_norm {:.3f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
-                epoch, batch, len(train_data) // args.bptt, lr, grad_norm,
+                epoch, batch, len(idxs), lr, grad_norm,
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
