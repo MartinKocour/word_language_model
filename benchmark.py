@@ -3,8 +3,10 @@ import torch
 import torch.nn as nn
 
 from model import CustomTransformerModel
+from torch.profiler import profile, record_function, ProfilerActivity
 
-V = 6000  # vocab size
+B = 4
+V = 128  # vocab size
 model_params = {
     "ntoken": V,
     #"ninp": 256,
@@ -19,6 +21,7 @@ use_gpu = torch.cuda.is_available()
 device = torch.device("cuda") if use_gpu else torch.device("cpu")
 criterion = nn.NLLLoss()
 train = False
+causal = True
 
 
 def build_model(attention_type, **params):
@@ -27,7 +30,8 @@ def build_model(attention_type, **params):
 
 
 def build_sequence(length):
-    XY = torch.randint(V, (1, length + 1)).to(device)
+    # B = 2**13 // length or 1
+    XY = torch.randint(V, (B, length + 1)).to(device)
     return XY[:, :length], XY[:, 1:length+1]
 
 
@@ -35,8 +39,8 @@ def train_step(model, X, Y):
     # Simulate training
     model.train()
     model.zero_grad()
-    out = model(X)
-    loss = criterion(out.view(-1, V), Y.view(-1))
+    out = model(X, has_mask=causal)
+    loss = criterion(out.reshape(-1, V), Y.reshape(-1))
     loss.backward()
     # model update
     for p in model.parameters():
@@ -44,67 +48,88 @@ def train_step(model, X, Y):
             p.data.add_(p.grad, alpha=2e-3)
     # cuda operations are asynchronous
     # we need to synchronize GPU and CPU, e.g. to mesure time complexity
-    torch.cuda.synchronize()
-    del out
-    del loss
+    use_gpu and torch.cuda.synchronize()
     return
 
 
 def eval_step(model, X, Y):
     model.eval()
     with torch.no_grad():
-        out = model(X)
-        loss = criterion(out.view(-1, V), Y.view(-1))
-    torch.cuda.synchronize()
-    del out
-    del loss
-    return
+        out = model(X, has_mask=causal)
+        loss = criterion(out.reshape(-1, V), Y.reshape(-1))
+    use_gpu and torch.cuda.synchronize()
+    return loss
 
 
-def benchmark_mem(model, trials=10, min_len=1000, max_len=100_000, step=1000, train=True):
+def benchmark(model, train=True):
     report = Report("Peak GPU Memory", index_col_name="sequence_length")
     state_dict = model.state_dict()
-    for length in range(min_len, max_len, step):
+    for length in map(int, torch.logspace(6, 14, 9, base=2)):
         use_gpu and torch.cuda.reset_max_memory_allocated()
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            profile_memory=True,
+            with_flops=True,
+            # record_shapes=True,
+            # run profiling after 5 steps for another 5 steps (due to torch initialization etc.)
+            schedule=torch.profiler.schedule(wait=2, warmup=1, active=5, repeat=0, skip_first=2)
+        ) as prof:
+            for trial in range(10):
+                X, Y = build_sequence(length)
+                try:
+                    if train:
+                        train_step(model, X, Y)
+                    else:
+                        eval_step(model, X, Y)
 
-        for trial in range(trials):
-            X, Y = build_sequence(length)
-            try:
-                if train:
-                    train_step(model, X, Y)
-                else:
-                    eval_step(model, X, Y)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    print('| WARNING: ran out of memory')
-                    torch.cuda.empty_cache()
-                    break
-                else:
-                    raise e
-            del X
-            del Y
+                except RuntimeError as e:
+                    if 'out of memory' in str(e):
+                        print(f'| WARNING: ran out of memory with input of shape {X.shape}')
+                        torch.cuda.empty_cache()
+                        return report
+                    else:
+                        raise e
+                prof.step()
 
-        mem = torch.cuda.max_memory_allocated()
-        report.log(sequence_length=length, gpu_memory=mem)
+        # B = 2**16//length
+        # `Attention Layer` is defined in fast_transformers/attention/attention_layer.py
+        prof_stats = list(filter(lambda k: k.key == "Attention Layer", prof.key_averages()))[0]
+        prof_norm = B * 5
+        cuda_mem = prof_stats.device_memory_usage / prof_norm  # bytes
+        cpu_mem = prof_stats.cpu_memory_usage / prof_norm      # bytes
+        cpu_time = prof_stats.cpu_time_total / prof_norm       # micro seconds
+        cuda_time = prof_stats.device_time_total / prof_norm   # micro seconds
+        report.log(sequence_length=length, gpu_memory=cuda_mem, cuda_time=cuda_time, cpu_memory=cpu_mem, cpu_time=cpu_time)
         model.load_state_dict(state_dict)
+        # print(
+        #     prof.key_averages().table(
+        #         # sort_by="cpu_time_total",
+        #         sort_by="flops",
+        #         row_limit=-1,
+        #         # top_level_events_only=True,
+        #         top_level_events_only=False,
+        #     )
+        # )
     return report
 
 
 def benchmark_all():
-    mem_report = Report("Peak GPU Memory", "sequence_length")
-    for attention_type in ["euclidean", "fast_euclidean", "hyper_mixing", "summary_mixing", "full"]:
-        print(f"Memory usage of {attention_type} model...")
+    report = Report("Peak GPU Memory", "sequence_length")
+    for attention_type in ["euclidean", "fast_euclidean", "hyper_mixing", "summary_mixing", "full", "linear"]:
+        if causal and attention_type == "linear":
+            continue
+        print(f"Benchmarking {attention_type} model...")
         model = build_model(attention_type, **model_params)
-        r = benchmark_mem(model, train=train)
+        r = benchmark(model, train=train)
         r.name = attention_type
-        if not mem_report.has_col("sequence_length"):
-            mem_report.report["sequence_length"] = r.report["sequence_length"]
+        if not report.has_col("sequence_length"):
+            report.report["sequence_length"] = r.report["sequence_length"]
         r.drop_col("sequence_length")
-        mem_report = mem_report.merge(r)
+        report = report.merge(r)
         del model
-    mem_report.to_csv()
+    report.to_csv()
     print("Saving results into `benchmark.csv`")
-    mem_report.to_csv("benchmark.csv")
+    report.to_csv("benchmark.csv")
 
 
 class Report:
